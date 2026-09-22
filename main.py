@@ -445,13 +445,26 @@ def generate_content_with_fallback(
     config: Optional[types.GenerateContentConfig] = None,
 ) -> types.GenerateContentResponse:
     """
-    Attempts generation with primary model (gemini-2.5-flash) and automatically
-    falls back to gemini-3.6-flash if Google's API returns a 404 / no longer available.
+    Resilient generation cascade:
+    Attempts generation with primary model (defaults to gemini-3.5-flash) and
+    automatically cascades through available models (gemini-3.5-flash-lite,
+    gemini-3.7-flash, gemini-3.1-flash-lite, gemini-3.6-flash, gemini-2.5-flash)
+    if Google API returns 404 (model sunset), 429 (quota exhausted), or 503 (high demand).
     """
-    models_to_try = [
-        os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+    priority_models = [
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.7-flash",
+        "gemini-3.1-flash-lite",
         "gemini-3.6-flash",
+        "gemini-2.5-flash",
     ]
+    env_model = os.getenv("GEMINI_MODEL")
+    if env_model:
+        models_to_try = [env_model] + [m for m in priority_models if m != env_model]
+    else:
+        models_to_try = priority_models
+
     last_err = None
     for model_name in models_to_try:
         try:
@@ -462,22 +475,52 @@ def generate_content_with_fallback(
             )
         except Exception as exc:
             last_err = exc
-            if "404" in str(exc) or "no longer available" in str(exc) or "NOT_FOUND" in str(exc):
+            err_str = str(exc).lower()
+            # If model is unavailable (404), quota exhausted (429), or overloaded (503), try next model
+            if any(marker in err_str for marker in [
+                "404", "not_found", "no longer available",
+                "429", "resource_exhausted", "quota", "rate limit",
+                "503", "unavailable", "demand", "500", "internal"
+            ]):
                 continue
             raise exc
-    raise last_err
+    if last_err:
+        raise last_err
+    raise RuntimeError("No Gemini models available for generation.")
+
+
+def parse_structured_json(raw_text: str, schema_cls: Any) -> Any:
+    """
+    Safely parses JSON responses from LLM, stripping markdown code block fences if present.
+    """
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+    return schema_cls.model_validate_json(cleaned)
 
 
 def generate_vector_embedding(client: genai.Client, text: str) -> List[float]:
     """
-    Generates high-dimensional vector embedding using text-embedding-004,
-    falling back automatically to gemini-embedding-2 if Google API returns 404.
+    Generates high-dimensional vector embedding using gemini-embedding-2,
+    falling back automatically to gemini-embedding-001 or text-embedding-004.
     """
     truncated_text = text[:8000] if len(text) > 8000 else text
-    models_to_try = [
-        os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004"),
+    priority_models = [
         "gemini-embedding-2",
+        "gemini-embedding-001",
+        "text-embedding-004",
     ]
+    env_model = os.getenv("GEMINI_EMBEDDING_MODEL")
+    if env_model:
+        models_to_try = [env_model] + [m for m in priority_models if m != env_model]
+    else:
+        models_to_try = priority_models
+
     last_err = None
     for model_name in models_to_try:
         try:
@@ -489,7 +532,12 @@ def generate_vector_embedding(client: genai.Client, text: str) -> List[float]:
                 return res.embeddings[0].values
         except Exception as exc:
             last_err = exc
-            if "404" in str(exc) or "NOT_FOUND" in str(exc):
+            err_str = str(exc).lower()
+            if any(marker in err_str for marker in [
+                "404", "not_found", "no longer available",
+                "429", "resource_exhausted", "quota",
+                "503", "unavailable", "500"
+            ]):
                 continue
             raise exc
     if last_err:
@@ -887,7 +935,7 @@ async def process_candidate(
         if response.parsed and isinstance(response.parsed, CandidateExtraction):
             candidate_data = response.parsed
         elif response.text:
-            candidate_data = CandidateExtraction.model_validate_json(response.text)
+            candidate_data = parse_structured_json(response.text, CandidateExtraction)
         else:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -1035,7 +1083,7 @@ async def generate_minus_questions(payload: GenerateMinusQuestionsRequest):
         if response.parsed and isinstance(response.parsed, MinusQuestionsExtraction):
             questions_data = response.parsed
         elif response.text:
-            questions_data = MinusQuestionsExtraction.model_validate_json(response.text)
+            questions_data = parse_structured_json(response.text, MinusQuestionsExtraction)
         else:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -1154,7 +1202,7 @@ async def generate_feedback(payload: GenerateFeedbackRequest):
         if response.parsed and isinstance(response.parsed, CapabilityReport):
             report_data = response.parsed
         elif response.text:
-            report_data = CapabilityReport.model_validate_json(response.text)
+            report_data = parse_structured_json(response.text, CapabilityReport)
         else:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,

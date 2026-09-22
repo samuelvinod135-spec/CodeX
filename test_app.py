@@ -21,7 +21,13 @@ client = TestClient(app)
 
 def test_health_check():
     """Verify health check endpoint returns 200 and version 5.0.0."""
-    response = client.get("/")
+    # Test HTML frontend on root
+    root_resp = client.get("/")
+    assert root_resp.status_code == 200
+    assert "CodeX" in root_resp.text
+
+    # Test JSON health API on /health
+    response = client.get("/health")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "healthy"
