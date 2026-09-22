@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
@@ -625,7 +626,8 @@ def calculate_skill_dominant_matrix(
 # ---------------------------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------------------------
-@app.get("/", tags=["Health"])
+@app.get("/health", tags=["Health"])
+@app.get("/api", tags=["Health"])
 async def health_check():
     """Health check and Next-Gen ATS API capabilities overview."""
     gemini_key_present = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
@@ -1180,6 +1182,14 @@ async def generate_feedback(payload: GenerateFeedbackRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"An error occurred while generating capability feedback: {str(exc)}",
         )
+
+
+# ---------------------------------------------------------------------------
+# Mount Frontend Static WebApp
+# ---------------------------------------------------------------------------
+frontend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+if os.path.exists(frontend_dir):
+    app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
 
 
 if __name__ == "__main__":
